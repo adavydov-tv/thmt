@@ -1,0 +1,11 @@
+{{- if .Values.dashboard.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "dashboard.name" . }}
+  labels: {{- include "dashboard.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.dashboard.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels: {{- include "dashboard.selectorLabels" . | nindent 6 }}
+{{- end }}

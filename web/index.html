@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="ru" data-theme="light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>Team Health Management Tools</title>
+    <script>
+      // До загрузки React выставляем сохранённую (или системную) тему,
+      // иначе страница мигает светлой темой при каждой перезагрузке.
+      try {
+        var m = localStorage.getItem('theme')
+        if (m !== 'dark' && m !== 'light') {
+          m = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+        }
+        document.documentElement.setAttribute('data-theme', m)
+      } catch (e) {
+        /* остаёмся на data-theme="light" из разметки */
+      }
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

@@ -1,0 +1,135 @@
+# [АРХИВ / GitLab-вариант] Основной CI/CD теперь на GitHub Actions
+# (.github/workflows/deploy.yml). Этот файл оставлен на будущее — если проект
+# вернётся на self-hosted GitLab (git.xtools.tv). GitHub его не читает.
+#
+# Pipeline: сборка и деплой прямо на удалённой машине (Mac), без registry/k8s.
+#
+#   merge_request_event      -> lint + test + frontend + security
+#   push в master (после MR)  -> те же проверки + deploy (docker compose на хосте)
+#
+# Деплой выполняет SELF-HOSTED shell-раннер, зарегистрированный НА целевом Маке
+# (тег `macdeploy`). Он собирает образ локально (docker compose build) и
+# поднимает стек — registry не используется.
+#
+# Секреты (переходный вариант, без Vault): весь .env хранится ОДНОЙ CI/CD-
+# переменной типа File — APP_ENV (Settings > CI/CD > Variables, Type: File,
+# Protected). Раннер разворачивает её в .env перед сборкой. Опционально
+# GOOGLE_SA_JSON (File) — ключ сервис-аккаунта Google для файлового режима.
+#
+# ВАЖНО: Маку нужен постоянный VPN + внутренний DNS ко всем *.xtools.tv,
+# иначе коллекторы упрутся в SSO-редиректы. Контейнер app запускается с
+# GODEBUG=netdns=go; при проблемах с DNS из контейнера см. network_mode/DNS
+# настройки Colima/Docker.
+
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "master" && $CI_PIPELINE_SOURCE == "push"'
+
+stages:
+  - lint
+  - test
+  - security
+  - deploy
+
+variables:
+  GO_IMAGE: golang:1.24-alpine
+  NODE_IMAGE: node:22-alpine
+  TRIVY_IMAGE: aquasec/trivy:latest
+  GOMODCACHE: "$CI_PROJECT_DIR/.gomodcache"
+
+.go_cache: &go_cache
+  cache:
+    key:
+      files:
+        - go.sum
+    paths:
+      - .gomodcache
+
+# --- проверки (image-based; идут на общих раннерах GitLab). Если общих
+#     раннеров нет — добавьте им `tags: [macdeploy]`, тогда тоже пойдут на Маке. ---
+
+lint:
+  stage: lint
+  image: $GO_IMAGE
+  <<: *go_cache
+  script:
+    - |
+      fmt=$(gofmt -l cmd internal)
+      if [ -n "$fmt" ]; then echo "gofmt needs to run on:"; echo "$fmt"; exit 1; fi
+    - go vet ./...
+
+test:
+  stage: test
+  image: $GO_IMAGE
+  <<: *go_cache
+  script:
+    # -race ловит гонки в оркестраторе с его параллельными коллекторами.
+    - apk add --no-cache gcc musl-dev
+    - CGO_ENABLED=1 go test -race ./...
+
+frontend:
+  stage: test
+  image: $NODE_IMAGE
+  cache:
+    key:
+      files:
+        - web/package-lock.json
+    paths:
+      - web/node_modules
+  script:
+    - cd web
+    - npm ci
+    - npx tsc -b
+    - npm run build
+
+govulncheck:
+  stage: security
+  image: $GO_IMAGE
+  <<: *go_cache
+  script:
+    - go install golang.org/x/vuln/cmd/govulncheck@latest
+    - $(go env GOPATH)/bin/govulncheck ./...
+
+trivy:
+  stage: security
+  image:
+    name: $TRIVY_IMAGE
+    entrypoint: [""]
+  script:
+    - trivy fs --scanners vuln,secret --exit-code 1 --severity HIGH,CRITICAL --no-progress .
+
+# --- деплой на целевой Мак: собрать образ локально и поднять стек ---
+
+deploy:
+  stage: deploy
+  tags:
+    - macdeploy          # self-hosted shell-раннер на целевом Маке
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "master" && $CI_PIPELINE_SOURCE == "push"'
+  variables:
+    # shell-раннер работает в рабочей копии на хосте; не тянем кэши/артефакты.
+    GIT_STRATEGY: fetch
+  script:
+    - |
+      if [ -z "$APP_ENV" ]; then
+        echo "APP_ENV (File-переменная с содержимым .env) не задана — добавьте в Settings > CI/CD > Variables"; exit 1
+      fi
+    # Разворачиваем секреты из CI-переменных в рабочую копию (.env в .gitignore).
+    - cp "$APP_ENV" .env
+    - |
+      if [ -n "$GOOGLE_SA_JSON" ]; then
+        mkdir -p secrets && cp "$GOOGLE_SA_JSON" secrets/google-service-account.json
+      fi
+    # Сборка образа приложения локально (без registry) и подъём стека.
+    - docker compose --profile full build app
+    - docker compose --profile full up -d postgres ai-scorer app
+    - docker compose ps
+    # Ждём, пока приложение станет healthy (иначе падаем — деплой считается неуспешным).
+    - |
+      for i in $(seq 1 20); do
+        state=$(docker inspect -f '{{ .State.Health.Status }}' activity-app 2>/dev/null || echo starting)
+        if [ "$state" = "healthy" ]; then echo "activity-app healthy"; exit 0; fi
+        echo "ожидание готовности app: $state ($i/20)"; sleep 6
+      done
+      echo "app не стал healthy — смотрите docker logs activity-app"; docker compose logs --tail=40 app; exit 1

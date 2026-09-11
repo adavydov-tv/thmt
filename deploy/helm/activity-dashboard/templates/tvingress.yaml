@@ -1,0 +1,21 @@
+{{- if .Values.dashboard.tvingress.enabled }}
+# Внутренний ingress через оператор TVIngress. Хост выводится оператором:
+#   <kuber_service>.<namespace>.svc.<cluster>
+# например activity-dashboard.u-adavydov.svc.dal2.staging (VPN, не интернет).
+apiVersion: tradingview.com/v1
+kind: TvIngress
+metadata:
+  name: {{ include "dashboard.name" . }}
+  labels: {{- include "dashboard.labels" . | nindent 4 }}
+spec:
+  service_name: {{ include "dashboard.name" . | quote }}
+  cluster_id: {{ .Values.dashboard.tvingress.clusterId | quote }}
+  location: {{ .Values.dashboard.tvingress.location | quote }}
+  kuber_service: {{ include "dashboard.name" . | quote }}
+  port: {{ .Values.dashboard.tvingress.port }}
+  url_location: {{ .Values.dashboard.tvingress.urlLocation | quote }}
+  req_limit: {{ .Values.dashboard.tvingress.reqLimit }}
+  req_limit_burst: {{ .Values.dashboard.tvingress.reqLimitBurst }}
+  client_max_body_size: {{ .Values.dashboard.tvingress.clientMaxBodySize | quote }}
+  active: true
+{{- end }}

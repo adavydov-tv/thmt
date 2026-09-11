@@ -1,0 +1,87 @@
+# CI/CD для облачного GitHub.
+#   - проверки (lint/test/frontend) — на бесплатных GitHub-hosted раннерах;
+#   - deploy — на SELF-HOSTED раннере, установленном на целевом Маке
+#     (метки: self-hosted, macos, macdeploy). Он собирает образ локально
+#     (docker compose build) и поднимает стек — без registry и Kubernetes.
+#
+# Секреты (Settings → Secrets and variables → Actions):
+#   APP_ENV         — весь .env целиком (многострочный секрет);
+#   GOOGLE_SA_JSON  — ключ сервис-аккаунта Google (если файловый режим).
+#
+# ВАЖНО: Маку нужен постоянный VPN + Colima (docker). Старая схема GitLab —
+# в .gitlab-ci.yml рядом.
+
+name: CI/CD
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+# Деплой не отменяем на лету: параллельные пуши ставятся в очередь, чтобы не
+# оборвать docker compose на полпути.
+concurrency:
+  group: cicd-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      - name: lint & vet
+        run: |
+          fmt=$(gofmt -l cmd internal)
+          if [ -n "$fmt" ]; then echo "gofmt needs to run on:"; echo "$fmt"; exit 1; fi
+          go vet ./...
+      - name: test (-race)
+        run: go test -race ./...
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: frontend
+        run: |
+          cd web
+          npm ci
+          npx tsc -b
+          npm run build
+
+  deploy:
+    needs: checks
+    if: github.event_name == 'push'
+    # Метки целевого раннера на Маке (Settings → Actions → Runners).
+    runs-on: [self-hosted, macOS, ARM64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: разворачиваем секреты
+        # Секреты передаём через env, а НЕ подстановкой ${{ }} в текст скрипта:
+        # иначе кавычки внутри .env (JSON ACTIVITY_PEOPLE) рвут shell-кавычки
+        # и значение портится. $APP_ENV в кавычках сохраняет содержимое дословно.
+        env:
+          APP_ENV: ${{ secrets.APP_ENV }}
+          GOOGLE_SA_JSON: ${{ secrets.GOOGLE_SA_JSON }}
+        run: |
+          printf '%s' "$APP_ENV" > .env
+          if [ -n "$GOOGLE_SA_JSON" ]; then
+            mkdir -p secrets
+            printf '%s' "$GOOGLE_SA_JSON" > secrets/google-service-account.json
+          fi
+
+      - name: сборка и подъём стека
+        run: |
+          docker compose --profile full build app
+          docker compose --profile full up -d postgres ai-scorer app
+          docker compose ps
+
+      - name: ждём готовности app
+        run: |
+          for i in $(seq 1 20); do
+            state=$(docker inspect -f '{{ .State.Health.Status }}' activity-app 2>/dev/null || echo starting)
+            if [ "$state" = "healthy" ]; then echo "activity-app healthy"; exit 0; fi
+            echo "ожидание готовности app: $state ($i/20)"; sleep 6
+          done
+          echo "app не стал healthy — смотрите логи"; docker compose logs --tail=40 app; exit 1

@@ -1,0 +1,79 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: activity-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: activity
+      POSTGRES_PASSWORD: activity
+      POSTGRES_DB: activity
+      # Инициализация без учёта локали ускоряет старт и не влияет на наши запросы
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8"
+    ports:
+      - "5432:5432"
+    volumes:
+      - activity-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U activity -d activity"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Сервис приложения. Для локальной разработки обычно достаточно поднять
+  # только postgres (docker compose up -d postgres) и запускать Go руками.
+  app:
+    build: .
+    container_name: activity-app
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      POSTGRES_DSN: postgres://activity:activity@postgres:5432/activity?sslmode=disable
+      SERVER_ADDR: ":8080"
+      STATIC_DIR: /app/web/dist
+      # AI-скорер — соседний сервис в этой же сети compose.
+      AI_SCORER_URL: http://ai-scorer:8090
+      # Go-резолвер читает resolv.conf: нужен для внутренних *.xtools.tv за VPN
+      # (системный резолвер иногда отдаёт публичный IP → SSO-редирект).
+      GODEBUG: netdns=go
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ai-scorer:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    volumes:
+      # Ключ сервис-аккаунта Google, если используется файловый вариант
+      - ./secrets:/app/secrets:ro
+    healthcheck:
+      # Проверяем корень (SPA, без авторизации): /api/health за authMiddleware
+      # отдаёт 401 и ложно ронял healthcheck в unhealthy.
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/ >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+    profiles: ["full"]
+
+  # Локальная AI-модель для оценки содержательности сообщений Slack (0–10).
+  # Примеры калибровки живут в томе activity-ai-data и переживают пересборку.
+  ai-scorer:
+    build: ./ai-scorer
+    container_name: activity-ai
+    restart: unless-stopped
+    ports:
+      # Наружу — 8091: 8090 на машинах разработчиков бывает занят.
+      - "8091:8090"
+    volumes:
+      - activity-ai-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:8090/health\")'"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+
+volumes:
+  activity-pgdata:
+  activity-ai-data:

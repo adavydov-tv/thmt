@@ -1,0 +1,9 @@
+apiVersion: v2
+name: activity-dashboard
+description: |
+  user-activity-dashboard — сбор активности человека из Jira, GitLab, Slack и
+  Google Docs с дашбордом. Самодостаточный inline-templates чарт, по образцу
+  incidentbot-go.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

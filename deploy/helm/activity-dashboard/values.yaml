@@ -1,0 +1,183 @@
+---
+dashboard:
+  # cluster-scoped override set by the ApplicationSet generator.
+  clusterDomain: ""
+
+  # Operational identity: обязательные метки пода и SERVICE_NAME / TEAM /
+  # ENVIRONMENT в логах и метриках. `team` обязателен перед production-установкой.
+  ops:
+    service: activity-dashboard
+    subservice: activity-dashboard
+    team: ""
+    environment: staging          # local | staging | stable | production
+
+  replicaCount: 1
+  revisionHistoryLimit: 5
+  progressDeadlineSeconds: 300
+  terminationGracePeriodSeconds: 60
+
+  image:
+    # Собирается Jenkins-джобой docker_container (container: activity-dashboard),
+    # публикуется в registry.xtools.tv. Тег — <ветка>-<номер сборки>.
+    repository: registry.xtools.tv/activity-dashboard
+    pullPolicy: IfNotPresent
+    tag: "master-1"
+
+  service:
+    type: ClusterIP
+    port: 80               # -> контейнерный :8080
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+
+  # Hardening: статический бинарь, на диск не пишет — read-only rootfs,
+  # без привилегий, все capabilities сброшены.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    privileged: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
+
+  # Пробы ходят в /api/health: он отвечает 200 и при недоступной БД (состояние
+  # БД — в теле ответа), поэтому падение базы не перезапускает здоровый процесс.
+  probes:
+    startup:
+      failureThreshold: 30
+      periodSeconds: 2
+    liveness:
+      periodSeconds: 30
+      timeoutSeconds: 3
+      failureThreshold: 3
+    readiness:
+      periodSeconds: 10
+      timeoutSeconds: 3
+      failureThreshold: 3
+
+  # Встроенный Postgres — только для dev/staging: один writer, без репликации
+  # и бэкапов. В production выключить и указать POSTGRES_DSN в Secret.
+  postgres:
+    enabled: true
+    image: postgres:16-alpine
+    user: activity
+    db: activity
+    storage:
+      className: openebs-lvm-vgssd
+      size: 10Gi
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+  secrets:
+    # Production: имя Secret, который ExternalSecret проецирует из хранилища
+    # секретов организации. Тогда create=false и data пустой.
+    existingSecret: ""
+    # Рендерить chart-managed Secret из `data` (staging). В личном namespace,
+    # где создавать Secret нельзя, — см. insecureInConfigMap.
+    create: true
+    # Staging-фолбэк: значения для chart-managed Secret. Передавать через
+    # -f values-local.yaml, никогда не коммитить.
+    data: {}
+    #  JIRA_API_TOKEN: ""
+    #  GITLAB_TOKEN: ""
+    #  SLACK_USER_TOKEN: ""
+    #  SLACK_BOT_TOKEN: ""
+    #  GOOGLE_CREDENTIALS_JSON: ""
+    #  GOOGLE_OAUTH_CLIENT_ID: ""
+    #  GOOGLE_OAUTH_CLIENT_SECRET: ""
+    #  GOOGLE_OAUTH_REFRESH_TOKEN: ""
+    #  POSTGRES_PASSWORD: ""
+    #  POSTGRES_DSN: ""     # задать при postgres.enabled=false
+
+    # Лазейка для личного namespace (читать Secret можно, создавать нельзя):
+    # секреты уезжают в ConfigMap под `config:` — видны всем с доступом на
+    # чтение namespace. Чарт отказывает вне local/staging.
+    insecureInConfigMap: false
+    # Пароль встроенного Postgres, когда Secret вовсе отсутствует.
+    insecurePostgresPassword: "activity"
+
+  # Несекретная конфигурация приложения -> ConfigMap (envFrom).
+  config:
+    SERVER_ADDR: ":8080"
+    STATIC_DIR: "/app/web/dist"
+    LOG_LEVEL: "info"
+    CORS_ALLOWED_ORIGINS: ""
+    POSTGRES_MIGRATE_ON_START: "true"
+    POSTGRES_MAX_CONNS: "8"
+    # --- Jira Cloud ---
+    JIRA_ENABLED: "true"
+    JIRA_BASE_URL: ""
+    JIRA_EMAIL: ""
+    JIRA_PROJECTS: ""
+    # --- GitLab (self-hosted) ---
+    GITLAB_ENABLED: "true"
+    GITLAB_BASE_URL: ""
+    GITLAB_SKIP_TLS_VERIFY: "false"
+    # --- Slack ---
+    SLACK_ENABLED: "true"
+    SLACK_INCLUDE_REACTIONS: "true"
+    # --- Google Docs / Drive ---
+    GOOGLE_ENABLED: "true"
+    GOOGLE_AUTH_MODE: "service_account"
+    GOOGLE_IMPERSONATE_SUBJECT: ""
+    GOOGLE_SCAN_DRIVE: "true"
+    GOOGLE_DRIVE_FOLDER_IDS: ""
+    GOOGLE_MAX_DOCS: "500"
+    # --- HRDB (Atlassian Assets): сотрудники и автопоиск аккаунтов ---
+    HRDB_ENABLED: "true"
+    HRDB_WORKSPACE_ID: ""
+    HRDB_EMPLOYEE_TYPE_ID: ""
+    HRDB_CACHE_TTL: "10m"
+    # --- Сбор ---
+    SYNC_CONCURRENCY: "4"
+    SYNC_HTTP_TIMEOUT: "45s"
+    SYNC_RUN_TIMEOUT: "30m"
+    SYNC_MAX_RETRIES: "4"
+    SYNC_DEFAULT_LOOKBACK: "720h"
+    # Люди можно посеять из ENV; обычно проще заводить через UI (HRDB-блок).
+    ACTIVITY_PEOPLE: ""
+
+  # PodDisruptionBudget — имеет смысл только при replicaCount > 1.
+  podDisruptionBudget:
+    enabled: false
+    minAvailable: 1
+
+  ingress:
+    enabled: false
+    className: nginx
+    # Wildcard *.<location>.xstaging.tv уже смотрит на ingress-nginx (TLS
+    # терминируется там) — достаточно выбрать имя в этом домене.
+    host: activity.dal2.xstaging.tv
+    annotations:
+      nginx.ingress.kubernetes.io/ssl-redirect: "true"
+      nginx.ingress.kubernetes.io/limit-rps: "20"
+      nginx.ingress.kubernetes.io/limit-burst-multiplier: "2"
+      nginx.ingress.kubernetes.io/proxy-body-size: "1m"
+
+  # Внутренний ingress через оператор TVIngress (nginx-tvingress).
+  # Host выводится оператором: activity-dashboard.<namespace>.svc.<cluster>
+  tvingress:
+    enabled: false
+    location: dal2
+    clusterId: activity-dashboard-u-adavydov
+    port: 8080
+    urlLocation: "/"
+    reqLimit: 20
+    reqLimitBurst: 40
+    clientMaxBodySize: "1m"

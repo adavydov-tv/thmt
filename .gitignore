@@ -1,0 +1,37 @@
+# секреты
+.env
+.env.local
+secrets/
+people.json
+*.pem
+*-service-account*.json
+
+# сборка
+bin/
+web/dist/
+web/node_modules/
+node_modules/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# прочее
+.DS_Store
+*.log
+
+# Локальные helm-values с токенами — не коммитить
+deploy/helm/values-local.yaml
+
+# скриншоты в корне (рабочие, не для репозитория)
+/img*.png
+
+# локальные семплы выгрузок Claude usage (содержат PII: e-mail, hostname, serial)
+/*.jsonl
+
+# дампы БД и архивы томов (PII, крупные) — только локально, не в репозитории
+*.dump
+*.tgz
+activity.dump
+ai-data.tgz

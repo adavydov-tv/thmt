@@ -1,0 +1,44 @@
+# Локальный, НЕкоммитимый конфиг activity-dashboard (скопируйте в
+# values-local.yaml и заполните). Деплой:
+#   ./deploy.sh          # deploy.sh сам подхватит values-local.yaml
+# values-local.yaml в .gitignore — реальные токены в репозиторий не попадают.
+dashboard:
+  image:
+    tag: "master-1"              # тег из Jenkins-джобы docker_container
+  ops:
+    team: ""                     # ваша команда; обязательна для production
+    environment: staging
+  tvingress:
+    enabled: true
+    location: dal2
+    clusterId: activity-dashboard-u-adavydov
+
+  # Личный namespace u-adavydov разрешает ЧИТАТЬ Secret'ы, но не создавать —
+  # поэтому секреты уезжают в ConfigMap. Чарт откажет в этом режиме для
+  # stable/production. В общем namespace: create=false не трогать,
+  # existingSecret указать на Secret из ExternalSecret, а токены ниже
+  # перенести из config в тот Secret.
+  secrets:
+    create: false
+    insecureInConfigMap: true
+
+  config:
+    # --- Jira Cloud (эти же креды используются для HRDB / Assets) ---
+    JIRA_BASE_URL: "https://your-company.atlassian.net"
+    JIRA_EMAIL: ""
+    JIRA_API_TOKEN: ""
+    # --- HRDB (Atlassian Assets): сотрудники + автопоиск аккаунтов ---
+    HRDB_WORKSPACE_ID: ""        # GET /rest/servicedeskapi/assets/workspace
+    HRDB_EMPLOYEE_TYPE_ID: ""    # objectTypeId типа Employee в схеме HRDB
+    # --- GitLab (self-hosted) ---
+    GITLAB_BASE_URL: "https://gitlab.your-company.com"
+    GITLAB_TOKEN: ""
+    # --- Slack ---
+    SLACK_USER_TOKEN: ""         # xoxp-…, scope search:read (+users:read.email)
+    SLACK_BOT_TOKEN: ""          # xoxb-…, фолбэк-стратегия и реакции
+    # --- Google Docs / Drive ---
+    GOOGLE_AUTH_MODE: "service_account"
+    GOOGLE_CREDENTIALS_JSON: ""  # JSON-ключ сервис-аккаунта одной строкой
+    GOOGLE_IMPERSONATE_SUBJECT: ""
+    GOOGLE_SCAN_DRIVE: "true"
+    GOOGLE_DRIVE_FOLDER_IDS: ""

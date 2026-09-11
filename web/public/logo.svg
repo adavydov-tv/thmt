@@ -1,0 +1,16 @@
+<svg width="32" height="32" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Team Health Management Tools">
+  <defs>
+    <linearGradient id="thmBg" x1="0" y1="0" x2="32" y2="32" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#3f8ae0"/>
+      <stop offset="1" stop-color="#2a78d6"/>
+    </linearGradient>
+  </defs>
+  <rect x="1" y="1" width="30" height="30" rx="8" fill="url(#thmBg)"/>
+  <!-- ЭКГ-пульс: «здоровье команды» -->
+  <path d="M4 18 H10 L12.5 11 L15.5 22 L18 15 L19.5 18 H28"
+        fill="none" stroke="#ffffff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- три узла — команда -->
+  <circle cx="9" cy="25" r="1.7" fill="#8fd3b6"/>
+  <circle cx="16" cy="25" r="1.7" fill="#8fd3b6"/>
+  <circle cx="23" cy="25" r="1.7" fill="#8fd3b6"/>
+</svg>

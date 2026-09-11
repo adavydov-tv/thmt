@@ -1,0 +1,101 @@
+{{- if and (eq .Values.dashboard.ops.environment "production") (not .Values.dashboard.ops.team) }}
+{{- fail "dashboard.ops.team must be set for a production install: it is the pod label operations escalate by" }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "dashboard.name" . }}
+  labels: {{- include "dashboard.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.dashboard.replicaCount }}
+  revisionHistoryLimit: {{ .Values.dashboard.revisionHistoryLimit }}
+  progressDeadlineSeconds: {{ .Values.dashboard.progressDeadlineSeconds }}
+  selector:
+    matchLabels: {{- include "dashboard.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "dashboard.labels" . | nindent 8 }}
+      annotations:
+        # Перезапуск пода при изменении ConfigMap — envFrom сам этого не делает.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      terminationGracePeriodSeconds: {{ .Values.dashboard.terminationGracePeriodSeconds }}
+      securityContext: {{- toYaml .Values.dashboard.podSecurityContext | nindent 8 }}
+      containers:
+        - name: dashboard
+          image: "{{ .Values.dashboard.image.repository }}:{{ .Values.dashboard.image.tag }}"
+          imagePullPolicy: {{ .Values.dashboard.image.pullPolicy }}
+          securityContext: {{- toYaml .Values.dashboard.securityContext | nindent 12 }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "dashboard.name" . }}-env
+            {{- with (include "dashboard.secretName" .) }}
+            # Токены Jira/GitLab/Slack/Google живут в Secret, а не в ConfigMap:
+            # право читать namespace не должно раздавать доступ во все системы.
+            - secretRef:
+                name: {{ . }}
+                optional: true
+            {{- end }}
+          env:
+            - name: SERVICE_NAME
+              value: {{ .Values.dashboard.ops.service | quote }}
+            - name: SUBSERVICE
+              value: {{ .Values.dashboard.ops.subservice | quote }}
+            - name: TEAM
+              value: {{ .Values.dashboard.ops.team | quote }}
+            - name: ENVIRONMENT
+              value: {{ .Values.dashboard.ops.environment | quote }}
+            - name: CLUSTER
+              value: {{ .Values.dashboard.clusterDomain | quote }}
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            {{- if .Values.dashboard.postgres.enabled }}
+            # DSN собирается из того же источника, из которого сам Postgres
+            # читает пароль.
+            - name: PGPASSWORD
+              {{- with (include "dashboard.secretName" .) }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ . }}
+                  key: POSTGRES_PASSWORD
+              {{- else }}
+              value: {{ .Values.dashboard.secrets.insecurePostgresPassword | quote }}
+              {{- end }}
+            - name: POSTGRES_DSN
+              value: >-
+                postgres://{{ .Values.dashboard.postgres.user }}:$(PGPASSWORD)@{{ include "dashboard.name" . }}-db:5432/{{ .Values.dashboard.postgres.db }}?sslmode=disable
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            failureThreshold: {{ .Values.dashboard.probes.startup.failureThreshold }}
+            periodSeconds: {{ .Values.dashboard.probes.startup.periodSeconds }}
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            periodSeconds: {{ .Values.dashboard.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.dashboard.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.dashboard.probes.readiness.failureThreshold }}
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            periodSeconds: {{ .Values.dashboard.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.dashboard.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.dashboard.probes.liveness.failureThreshold }}
+          resources: {{- toYaml .Values.dashboard.resources | nindent 12 }}
+          volumeMounts:
+            # readOnlyRootFilesystem: временные файлы — только сюда.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
