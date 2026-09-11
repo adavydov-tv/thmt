@@ -217,8 +217,28 @@ export const api = {
   compare: (q: CompareQuery) => request<CompareResponse>(`/stats/compare${buildQuery({ ...q })}`),
   compareTeams: (q: TeamsCompareQuery) =>
     request<TeamsCompareResponse>(`/stats/teams${buildQuery({ ...q })}`),
-  formatCompare: (q: { from: string; to: string; tz?: string; dim: string; cluster?: string; grade?: string }) =>
-    request<FormatCompareResponse>(`/stats/format-compare${buildQuery({ ...q })}`),
+  formatCompare: (q: {
+    from: string
+    to: string
+    tz?: string
+    dim: string
+    areas?: string[]
+    clusters?: string[]
+    grades?: string[]
+    rules?: string[]
+  }) =>
+    request<FormatCompareResponse>(
+      `/stats/format-compare${buildQuery({
+        from: q.from,
+        to: q.to,
+        tz: q.tz,
+        dim: q.dim,
+        areas: q.areas?.length ? q.areas.join(',') : undefined,
+        clusters: q.clusters?.length ? q.clusters.join(',') : undefined,
+        grades: q.grades?.length ? q.grades.join(',') : undefined,
+        rules: q.rules?.length ? q.rules.join(',') : undefined,
+      })}`,
+    ),
   abusers: (q: { from: string; to: string; tz?: string }) =>
     request<AbusersResponse>(`/stats/abusers${buildQuery({ ...q })}`),
   syncRun: (id: string) => request<SyncRun>(`/sync/${encodeURIComponent(id)}`),

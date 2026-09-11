@@ -302,14 +302,34 @@ export interface ViolationItem {
 export interface FormatCell {
   people: number
   avg_events_day: number
+  useful_events_day: number
   active_ratio: number
-  deviations: number
+  dev_per_person: number
+  dev_by_group: Record<string, number>
+}
+export interface FormatScatterPoint {
+  name: string
+  format: string
+  area: string
+  grade: string
+  events_day: number
+  useful_day: number
+  dev: number
+}
+export interface FormatTrend {
+  granularity: string
+  buckets: string[]
+  series: Record<string, number[]>
 }
 export interface FormatCompareResponse {
   dim: 'area' | 'cluster' | 'grade'
   formats: string[]
   rows: { key: string; cells: Record<string, FormatCell> }[]
   totals: Record<string, FormatCell>
+  scatter: FormatScatterPoint[]
+  trend: FormatTrend
+  groups: string[]
+  areas: string[]
   clusters: string[]
   grades: string[]
   from: string

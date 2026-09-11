@@ -1,8 +1,14 @@
 package api
 
-// Сравнение продуктивности по формату работы (office / hybrid / remote)
-// в разрезе направления (Area), кластера или грейда. Метрики берутся из
-// ComparePeople, формат/грейд/кластер — из HRDB (кэш + оргструктура).
+// Сравнение по формату работы (office / hybrid / remote): анализ продуктивности
+// и ОТКЛОНЕНИЙ в разрезе Направления / кластера / грейда. Один эндпоинт отдаёт
+// данные сразу для всех представлений фронта:
+//   - матрица (строки = измерение, столбцы = форматы);
+//   - тепловая карта (формат × группа отклонений);
+//   - скаттер (точка на человека: продуктивность ↔ отклонения);
+//   - тренд по бакетам (линия событий/чел на формат).
+// Отклонения нормируются НА ЧЕЛОВЕКА (сырые счётчики отражают лишь численность).
+// Метрики — из ComparePeople; формат/грейд/кластер/Area — из HRDB и карточек.
 
 import (
 	"errors"
@@ -17,8 +23,27 @@ import (
 
 var workFormats = []string{"office", "hybrid", "remote"}
 
-// lowProdRules — отклонения «низкой продуктивности»: простои, спад активности,
-// низкая/только-Slack активность, нулевая активность в remote/WFH.
+// deviationGroups — порядок групп отклонений (совпадает с фронтовым ruleHelp).
+var deviationGroups = []string{"sick", "rest", "overtime", "activity", "team"}
+
+// ruleGroup — правило → группа (зеркало web/src/lib/ruleHelp.ts). Нужен для
+// разбивки отклонений по группам на стороне сервера.
+var ruleGroup = map[string]string{
+	"sick_adjacent": "sick", "sick_monthly": "sick",
+	"no_vacation": "rest", "work_on_vacation": "rest", "vacation_recovery": "rest",
+	"role_vacation_overlap": "rest",
+	"overtime_idle":         "overtime", "overtime_low": "overtime",
+	"offday_activity": "overtime", "long_workday": "overtime",
+	"idle_streak": "activity", "slack_only_days": "activity", "low_activity_days": "activity",
+	"activity_drop": "activity", "remote_zero": "activity", "remote_drop": "activity",
+	"wfh_zero": "activity", "steady_rhythm": "activity",
+	"onboarding_rise": "activity", "onboarding_flat": "activity", "role_inactive": "activity",
+	"bus_factor": "team", "no_reviewers": "team", "slow_review": "team",
+	"review_champion": "team", "mentor_one_on_ones": "team",
+}
+
+// lowProdRules — отклонения «низкой продуктивности»: набор по умолчанию, когда
+// пользователь не выбрал конкретные правила (негативные, про выработку).
 var lowProdRules = map[string]bool{
 	"idle_streak":       true,
 	"activity_drop":     true,
@@ -31,18 +56,40 @@ var lowProdRules = map[string]bool{
 }
 
 type formatCell struct {
-	People        int     `json:"people"`
-	AvgEventsDay  float64 `json:"avg_events_day"` // события на рабочий день
-	ActiveRatio   float64 `json:"active_ratio"`   // доля активных рабочих дней
-	Deviations    int     `json:"deviations"`     // отклонения низкой продуктивности
+	People          int                `json:"people"`
+	AvgEventsDay    float64            `json:"avg_events_day"`    // все события / рабочий день
+	UsefulEventsDay float64            `json:"useful_events_day"` // не-Slack события / рабочий день
+	ActiveRatio     float64            `json:"active_ratio"`      // доля активных рабочих дней
+	DevPerPerson    float64            `json:"dev_per_person"`    // выбранные отклонения на человека
+	DevByGroup      map[string]float64 `json:"dev_by_group"`      // группа → отклонений на человека
+
 	events        int
+	usefulEvents  int
 	workingDays   int
 	activeWorking int
+	devTotal      int
+	devGroupRaw   map[string]int
 }
 
 type formatRow struct {
 	Key   string                 `json:"key"`
 	Cells map[string]*formatCell `json:"cells"`
+}
+
+type scatterPoint struct {
+	Name      string  `json:"name"`
+	Format    string  `json:"format"`
+	Area      string  `json:"area"`
+	Grade     string  `json:"grade"`
+	EventsDay float64 `json:"events_day"`
+	UsefulDay float64 `json:"useful_day"`
+	Dev       int     `json:"dev"`
+}
+
+type formatTrend struct {
+	Granularity string               `json:"granularity"`
+	Buckets     []time.Time          `json:"buckets"`
+	Series      map[string][]float64 `json:"series"` // формат → события/чел по бакетам
 }
 
 func (s *Server) handleFormatCompare(w http.ResponseWriter, r *http.Request) {
@@ -63,8 +110,10 @@ func (s *Server) handleFormatCompare(w http.ResponseWriter, r *http.Request) {
 	if dim != "area" && dim != "cluster" && dim != "grade" {
 		dim = "area"
 	}
-	wantCluster := strings.TrimSpace(q.Get("cluster")) // фильтр по кластеру
-	wantGrade := strings.TrimSpace(q.Get("grade"))     // фильтр по грейду
+	wantAreas := csvSet(q.Get("areas"))
+	wantClusters := csvSet(q.Get("clusters"))
+	wantGrades := csvSet(q.Get("grades"))
+	selRules := csvSet(q.Get("rules")) // выбранные правила; пусто → lowProd по умолчанию
 
 	people, err := s.store.ListPeople(r.Context())
 	if err != nil {
@@ -73,9 +122,9 @@ func (s *Server) handleFormatCompare(w http.ResponseWriter, r *http.Request) {
 	}
 	scope := s.requestScope(r)
 
-	// HRDB: формат работы, грейд (по e-mail) и оргструктура (для кластера).
-	format := map[string]string{} // email → office|hybrid|remote
-	grade := map[string]string{}  // email → грейд
+	// HRDB: формат работы и грейд по e-mail, оргструктура для кластера.
+	format := map[string]string{}
+	grade := map[string]string{}
 	var structure map[string]hrdb.StructureUnit
 	if hc := s.hrdb.Current(); hc != nil {
 		if emps, err := hc.ListEmployees(r.Context()); err == nil {
@@ -87,8 +136,6 @@ func (s *Server) handleFormatCompare(w http.ResponseWriter, r *http.Request) {
 				if f := models.NormalizeWorkFormat(e.WorkFormat); f != "" {
 					format[em] = f
 				}
-				// Грейд: отдельный атрибут HRDB, а если его нет — первое слово
-				// должности («Senior Backend Development» → «Senior»).
 				g := strings.TrimSpace(e.Grade)
 				if g == "" {
 					if fields := strings.Fields(e.Title); len(fields) > 0 {
@@ -103,9 +150,9 @@ func (s *Server) handleFormatCompare(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Фильтруем людей: доступ (scope) + кластер + грейд. Заодно собираем
-	// все кластеры/грейды доступных людей — для выпадашек фильтров.
-	clusterSet, gradeSet := map[string]bool{}, map[string]bool{}
+	// Фильтрация людей (scope + мульти Area/Cluster/Grade) + сбор доступных
+	// значений для выпадашек.
+	areaSet, clusterSet, gradeSet := map[string]bool{}, map[string]bool{}, map[string]bool{}
 	filtered := people[:0]
 	for _, p := range people {
 		if scope != nil && !scope.persons[p.Key] {
@@ -113,33 +160,57 @@ func (s *Server) handleFormatCompare(w http.ResponseWriter, r *http.Request) {
 		}
 		em := strings.ToLower(strings.TrimSpace(p.Email))
 		cl := hrdb.TeamChain(structure, p.Team).Cluster
+		if p.Area != "" {
+			areaSet[p.Area] = true
+		}
 		if cl != "" {
 			clusterSet[cl] = true
 		}
 		if g := grade[em]; g != "" {
 			gradeSet[g] = true
 		}
-		if wantCluster != "" && !strings.EqualFold(cl, wantCluster) {
+		if len(wantAreas) > 0 && !wantAreas[strings.ToLower(p.Area)] {
 			continue
 		}
-		if wantGrade != "" && !strings.EqualFold(grade[em], wantGrade) {
+		if len(wantClusters) > 0 && !wantClusters[strings.ToLower(cl)] {
+			continue
+		}
+		if len(wantGrades) > 0 && !wantGrades[strings.ToLower(grade[em])] {
 			continue
 		}
 		filtered = append(filtered, p)
 	}
-	clusters, grades := sortedKeys(clusterSet), sortedKeys(gradeSet)
+	areas, clusters, grades := sortedKeys(areaSet), sortedKeys(clusterSet), sortedKeys(gradeSet)
 
-	// Отклонения низкой продуктивности за период — по person_key.
-	lowDevByPerson := map[string]int{}
+	// Отклонения за период по человеку и правилу.
+	devByPerson := map[string]map[string]int{}
 	if items, _, derr := s.deviations(r, deviationParams{from: from, to: to, loc: loc}); derr == nil {
 		for _, v := range items {
-			if lowProdRules[v.Rule] {
-				lowDevByPerson[v.PersonKey]++
+			m := devByPerson[v.PersonKey]
+			if m == nil {
+				m = map[string]int{}
+				devByPerson[v.PersonKey] = m
 			}
+			m[v.Rule]++
 		}
 	}
+	countsSelected := func(rules map[string]int) (total int, byGroup map[string]int) {
+		byGroup = map[string]int{}
+		for rule, n := range rules {
+			if len(selRules) > 0 {
+				if !selRules[rule] {
+					continue
+				}
+			} else if !lowProdRules[rule] {
+				continue
+			}
+			total += n
+			byGroup[ruleGroup[rule]] += n
+		}
+		return
+	}
 
-	metrics, _, err := s.store.ComparePeople(r.Context(), filtered, from, to, loc)
+	metrics, gran, err := s.store.ComparePeople(r.Context(), filtered, from, to, loc)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
@@ -148,13 +219,22 @@ func (s *Server) handleFormatCompare(w http.ResponseWriter, r *http.Request) {
 	rows := map[string]*formatRow{}
 	totals := map[string]*formatCell{}
 	for _, f := range workFormats {
-		totals[f] = &formatCell{}
+		totals[f] = newCell()
 	}
+	scatter := make([]scatterPoint, 0, len(metrics))
+	// Тренд: события/чел по бакетам на формат. Собираем из per-person Timeline.
+	trendSum := map[string]map[time.Time]int{} // формат → бакет → сумма событий
+	bucketSet := map[time.Time]bool{}
+	peoplePerFormat := map[string]int{}
+	for _, f := range workFormats {
+		trendSum[f] = map[time.Time]int{}
+	}
+
 	for _, m := range metrics {
 		em := strings.ToLower(strings.TrimSpace(m.Person.Email))
 		f := format[em]
 		if f == "" {
-			continue // неизвестный формат — в сравнение форматов не берём
+			continue // неизвестный формат — в сравнение не берём
 		}
 		var key string
 		switch dim {
@@ -172,13 +252,30 @@ func (s *Server) handleFormatCompare(w http.ResponseWriter, r *http.Request) {
 		if row == nil {
 			row = &formatRow{Key: key, Cells: map[string]*formatCell{}}
 			for _, wf := range workFormats {
-				row.Cells[wf] = &formatCell{}
+				row.Cells[wf] = newCell()
 			}
 			rows[key] = row
 		}
-		dev := lowDevByPerson[m.Person.Key]
-		accum(row.Cells[f], m, dev)
-		accum(totals[f], m, dev)
+		devTotal, devByGroup := countsSelected(devByPerson[m.Person.Key])
+		accum(row.Cells[f], m, devTotal, devByGroup)
+		accum(totals[f], m, devTotal, devByGroup)
+
+		useful := m.TotalEvents - m.BySource["slack"]
+		var evDay, usDay float64
+		if m.WorkingDays > 0 {
+			evDay = float64(m.TotalEvents) / float64(m.WorkingDays)
+			usDay = float64(useful) / float64(m.WorkingDays)
+		}
+		scatter = append(scatter, scatterPoint{
+			Name: m.Person.DisplayName, Format: f, Area: m.Person.Area, Grade: grade[em],
+			EventsDay: round1(evDay), UsefulDay: round1(usDay), Dev: devTotal,
+		})
+
+		peoplePerFormat[f]++
+		for _, sp := range m.Timeline {
+			trendSum[f][sp.Bucket] += sp.Count
+			bucketSet[sp.Bucket] = true
+		}
 	}
 
 	for _, row := range rows {
@@ -196,11 +293,33 @@ func (s *Server) handleFormatCompare(w http.ResponseWriter, r *http.Request) {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
 
+	// Ось бакетов тренда + нормировка на человека формата.
+	buckets := make([]time.Time, 0, len(bucketSet))
+	for b := range bucketSet {
+		buckets = append(buckets, b)
+	}
+	sort.Slice(buckets, func(i, j int) bool { return buckets[i].Before(buckets[j]) })
+	series := map[string][]float64{}
+	for _, f := range workFormats {
+		vals := make([]float64, len(buckets))
+		n := peoplePerFormat[f]
+		for i, b := range buckets {
+			if n > 0 {
+				vals[i] = round1(float64(trendSum[f][b]) / float64(n))
+			}
+		}
+		series[f] = vals
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"dim":      dim,
 		"formats":  workFormats,
 		"rows":     out,
 		"totals":   totals,
+		"scatter":  scatter,
+		"trend":    formatTrend{Granularity: gran, Buckets: buckets, Series: series},
+		"groups":   deviationGroups,
+		"areas":    areas,
 		"clusters": clusters,
 		"grades":   grades,
 		"from":     from,
@@ -208,17 +327,50 @@ func (s *Server) handleFormatCompare(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func accum(c *formatCell, m models.PersonMetrics, deviations int) {
+func newCell() *formatCell {
+	return &formatCell{DevByGroup: map[string]float64{}, devGroupRaw: map[string]int{}}
+}
+
+func accum(c *formatCell, m models.PersonMetrics, devTotal int, devByGroup map[string]int) {
 	c.People++
 	c.events += m.TotalEvents
+	c.usefulEvents += m.TotalEvents - m.BySource["slack"]
 	c.workingDays += m.WorkingDays
 	c.activeWorking += m.ActiveWorkingDays
-	c.Deviations += deviations
+	c.devTotal += devTotal
+	for g, n := range devByGroup {
+		c.devGroupRaw[g] += n
+	}
 }
 
 func finalizeCell(c *formatCell) {
 	if c.workingDays > 0 {
-		c.AvgEventsDay = float64(c.events) / float64(c.workingDays)
+		c.AvgEventsDay = round1(float64(c.events) / float64(c.workingDays))
+		c.UsefulEventsDay = round1(float64(c.usefulEvents) / float64(c.workingDays))
 		c.ActiveRatio = float64(c.activeWorking) / float64(c.workingDays)
 	}
+	if c.People > 0 {
+		c.DevPerPerson = round2(float64(c.devTotal) / float64(c.People))
+		for _, g := range deviationGroups {
+			c.DevByGroup[g] = round2(float64(c.devGroupRaw[g]) / float64(c.People))
+		}
+	}
 }
+
+// csvSet разбирает CSV-параметр в множество (в нижнем регистре); пусто → nil.
+func csvSet(v string) map[string]bool {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return nil
+	}
+	out := map[string]bool{}
+	for _, p := range strings.Split(v, ",") {
+		if p = strings.ToLower(strings.TrimSpace(p)); p != "" {
+			out[p] = true
+		}
+	}
+	return out
+}
+
+func round1(v float64) float64 { return float64(int(v*10+0.5)) / 10 }
+func round2(v float64) float64 { return float64(int(v*100+0.5)) / 100 }
