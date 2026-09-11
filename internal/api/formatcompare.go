@@ -61,14 +61,14 @@ type formatCell struct {
 	UsefulEventsDay float64            `json:"useful_events_day"` // не-Slack события / рабочий день
 	ActiveRatio     float64            `json:"active_ratio"`      // доля активных рабочих дней
 	DevPerPerson    float64            `json:"dev_per_person"`    // выбранные отклонения на человека
-	DevByGroup      map[string]float64 `json:"dev_by_group"`      // группа → отклонений на человека
+	DevByRule       map[string]float64 `json:"dev_by_rule"`       // правило → отклонений на человека (группы фронт складывает сам)
 
 	events        int
 	usefulEvents  int
 	workingDays   int
 	activeWorking int
 	devTotal      int
-	devGroupRaw   map[string]int
+	devRuleRaw    map[string]int
 }
 
 type formatRow struct {
@@ -194,18 +194,20 @@ func (s *Server) handleFormatCompare(w http.ResponseWriter, r *http.Request) {
 			m[v.Rule]++
 		}
 	}
-	countsSelected := func(rules map[string]int) (total int, byGroup map[string]int) {
-		byGroup = map[string]int{}
+	selected := func(rule string) bool {
+		if len(selRules) > 0 {
+			return selRules[rule]
+		}
+		return lowProdRules[rule]
+	}
+	countsSelected := func(rules map[string]int) (total int, byRule map[string]int) {
+		byRule = map[string]int{}
 		for rule, n := range rules {
-			if len(selRules) > 0 {
-				if !selRules[rule] {
-					continue
-				}
-			} else if !lowProdRules[rule] {
+			if !selected(rule) {
 				continue
 			}
 			total += n
-			byGroup[ruleGroup[rule]] += n
+			byRule[rule] += n
 		}
 		return
 	}
@@ -256,9 +258,9 @@ func (s *Server) handleFormatCompare(w http.ResponseWriter, r *http.Request) {
 			}
 			rows[key] = row
 		}
-		devTotal, devByGroup := countsSelected(devByPerson[m.Person.Key])
-		accum(row.Cells[f], m, devTotal, devByGroup)
-		accum(totals[f], m, devTotal, devByGroup)
+		devTotal, devByRule := countsSelected(devByPerson[m.Person.Key])
+		accum(row.Cells[f], m, devTotal, devByRule)
+		accum(totals[f], m, devTotal, devByRule)
 
 		useful := m.TotalEvents - m.BySource["slack"]
 		var evDay, usDay float64
@@ -311,6 +313,15 @@ func (s *Server) handleFormatCompare(w http.ResponseWriter, r *http.Request) {
 		series[f] = vals
 	}
 
+	// Эффективно учитываемые правила (для колонок карты и раскрытия таблицы).
+	effRules := []string{}
+	for rule := range ruleGroup {
+		if selected(rule) {
+			effRules = append(effRules, rule)
+		}
+	}
+	sort.Strings(effRules)
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"dim":      dim,
 		"formats":  workFormats,
@@ -319,6 +330,7 @@ func (s *Server) handleFormatCompare(w http.ResponseWriter, r *http.Request) {
 		"scatter":  scatter,
 		"trend":    formatTrend{Granularity: gran, Buckets: buckets, Series: series},
 		"groups":   deviationGroups,
+		"rules":    effRules,
 		"areas":    areas,
 		"clusters": clusters,
 		"grades":   grades,
@@ -328,18 +340,18 @@ func (s *Server) handleFormatCompare(w http.ResponseWriter, r *http.Request) {
 }
 
 func newCell() *formatCell {
-	return &formatCell{DevByGroup: map[string]float64{}, devGroupRaw: map[string]int{}}
+	return &formatCell{DevByRule: map[string]float64{}, devRuleRaw: map[string]int{}}
 }
 
-func accum(c *formatCell, m models.PersonMetrics, devTotal int, devByGroup map[string]int) {
+func accum(c *formatCell, m models.PersonMetrics, devTotal int, devByRule map[string]int) {
 	c.People++
 	c.events += m.TotalEvents
 	c.usefulEvents += m.TotalEvents - m.BySource["slack"]
 	c.workingDays += m.WorkingDays
 	c.activeWorking += m.ActiveWorkingDays
 	c.devTotal += devTotal
-	for g, n := range devByGroup {
-		c.devGroupRaw[g] += n
+	for rule, n := range devByRule {
+		c.devRuleRaw[rule] += n
 	}
 }
 
@@ -351,8 +363,8 @@ func finalizeCell(c *formatCell) {
 	}
 	if c.People > 0 {
 		c.DevPerPerson = round2(float64(c.devTotal) / float64(c.People))
-		for _, g := range deviationGroups {
-			c.DevByGroup[g] = round2(float64(c.devGroupRaw[g]) / float64(c.People))
+		for rule, n := range c.devRuleRaw {
+			c.DevByRule[rule] = round2(float64(n) / float64(c.People))
 		}
 	}
 }

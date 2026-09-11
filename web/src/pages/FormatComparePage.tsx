@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { Fragment, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   CartesianGrid,
@@ -21,9 +21,9 @@ import { api } from '../lib/api'
 import { TIMEZONE, useFilters } from '../lib/useFilters'
 import { fmtNumber, fmtBucket } from '../lib/format'
 import { useChartTokens } from '../lib/chartTheme'
-import { ruleGroups, ruleHelpEntries } from '../lib/ruleHelp'
+import { ruleGroups, ruleHelpEntries, ruleLabel, ruleGroupOf } from '../lib/ruleHelp'
 import { useT } from '../i18n'
-import type { FormatCompareResponse, FormatScatterPoint, Granularity } from '../lib/types'
+import type { FormatCell, FormatCompareResponse, FormatScatterPoint, Granularity } from '../lib/types'
 
 const FORMAT_LABEL: Record<string, [string, string]> = {
   office: ['Офис', 'Office'],
@@ -45,6 +45,7 @@ const POSITIVE_RULES = new Set([
 
 type View = 'table' | 'heatmap' | 'scatter' | 'trend'
 type Metric = 'events' | 'useful' | 'active'
+type Detail = 'group' | 'rule'
 type Translate = ReturnType<typeof useT>['t']
 
 const HINT_KEY = {
@@ -53,6 +54,26 @@ const HINT_KEY = {
   scatter: 'formatCompare.scatterHint',
   trend: 'formatCompare.trendHint',
 } as const
+
+interface Col {
+  key: string
+  label: string
+}
+
+/** Колонки разбивки отклонений: группы или отдельные правила. */
+function breakdownCols(data: FormatCompareResponse, detail: Detail, groupLabel: (k: string) => string): Col[] {
+  if (detail === 'rule') return data.rules.map((r) => ({ key: r, label: ruleLabel(r) }))
+  return data.groups.map((g) => ({ key: g, label: groupLabel(g) }))
+}
+
+/** Значение ячейки разбивки (на человека): правило напрямую, группа — сумма её правил. */
+function cellVal(cell: FormatCell | undefined, col: string, detail: Detail, data: FormatCompareResponse): number {
+  if (!cell) return 0
+  if (detail === 'rule') return cell.dev_by_rule[col] ?? 0
+  let s = 0
+  for (const r of data.rules) if (ruleGroupOf(r).key === col) s += cell.dev_by_rule[r] ?? 0
+  return Math.round(s * 100) / 100
+}
 
 export function FormatComparePage() {
   const { filters } = useFilters()
@@ -65,8 +86,8 @@ export function FormatComparePage() {
   const [grades, setGrades] = useState<string[]>([])
   const [view, setView] = useState<View>('table')
   const [metric, setMetric] = useState<Metric>('events')
+  const [detail, setDetail] = useState<Detail>('group')
 
-  // Каталог правил по группам и негативный набор по умолчанию.
   const { rulesByGroup, negativeRules } = useMemo(() => {
     const entries = ruleHelpEntries()
     const byGroup: Record<string, { key: string; label: string }[]> = {}
@@ -82,29 +103,16 @@ export function FormatComparePage() {
   const q = useQuery({
     queryKey: ['format-compare', filters.from, filters.to, dim, areas, clusters, grades, rules],
     queryFn: () =>
-      api.formatCompare({
-        from: filters.from,
-        to: filters.to,
-        tz: TIMEZONE,
-        dim,
-        areas,
-        clusters,
-        grades,
-        rules,
-      }),
+      api.formatCompare({ from: filters.from, to: filters.to, tz: TIMEZONE, dim, areas, clusters, grades, rules }),
   })
 
   const fmtLabel = (f: string) => FORMAT_LABEL[f]?.[lang === 'en' ? 1 : 0] ?? f
   const formatColor = (f: string) => tokens.slot(FORMAT_SLOT[f] ?? 0)
+  const accent = tokens.slot(0)
   const groups = ruleGroups()
   const groupLabel = (key: string) => groups.find((g) => g.key === key)?.label ?? key
-
   const dimTh =
-    dim === 'area'
-      ? t('formatCompare.dimArea')
-      : dim === 'cluster'
-        ? t('formatCompare.dimCluster')
-        : t('formatCompare.dimGrade')
+    dim === 'area' ? t('formatCompare.dimArea') : dim === 'cluster' ? t('formatCompare.dimCluster') : t('formatCompare.dimGrade')
 
   const views: { key: View; label: string }[] = [
     { key: 'table', label: t('formatCompare.viewTable') },
@@ -124,7 +132,7 @@ export function FormatComparePage() {
 
       {/* Панель фильтров */}
       <section className="card" style={{ padding: 14 }}>
-        <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'flex-start' }}>
+        <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'center' }}>
           <label className="muted" style={{ fontSize: 13 }}>
             {t('formatCompare.rowsBy')}{' '}
             <select value={dim} onChange={(e) => setDim(e.target.value as typeof dim)}>
@@ -141,11 +149,18 @@ export function FormatComparePage() {
               <option value="active">{t('formatCompare.metricActive')}</option>
             </select>
           </label>
+          <label className="muted" style={{ fontSize: 13 }}>
+            {t('formatCompare.detail')}{' '}
+            <select value={detail} onChange={(e) => setDetail(e.target.value as Detail)}>
+              <option value="group">{t('formatCompare.detailGroup')}</option>
+              <option value="rule">{t('formatCompare.detailRule')}</option>
+            </select>
+          </label>
         </div>
         <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', marginTop: 10 }}>
-          <MultiChips label={t('formatCompare.filterArea')} options={q.data?.areas ?? []} selected={areas} onChange={setAreas} />
-          <MultiChips label={t('formatCompare.filterCluster')} options={q.data?.clusters ?? []} selected={clusters} onChange={setClusters} />
-          <MultiChips label={t('formatCompare.filterGrade')} options={q.data?.grades ?? []} selected={grades} onChange={setGrades} />
+          <MultiChips label={t('formatCompare.filterArea')} options={q.data?.areas ?? []} selected={areas} onChange={setAreas} accent={accent} allLabel={t('formatCompare.filterAll')} />
+          <MultiChips label={t('formatCompare.filterCluster')} options={q.data?.clusters ?? []} selected={clusters} onChange={setClusters} accent={accent} allLabel={t('formatCompare.filterAll')} />
+          <MultiChips label={t('formatCompare.filterGrade')} options={q.data?.grades ?? []} selected={grades} onChange={setGrades} accent={accent} allLabel={t('formatCompare.filterAll')} />
         </div>
         <DeviationPicker
           rulesByGroup={rulesByGroup}
@@ -158,15 +173,9 @@ export function FormatComparePage() {
         />
       </section>
 
-      {/* Переключатель представлений */}
       <div className="inline-group" role="tablist">
         {views.map((v) => (
-          <button
-            key={v.key}
-            type="button"
-            className={`btn btn-sm${view === v.key ? ' btn-primary' : ''}`}
-            onClick={() => setView(v.key)}
-          >
+          <button key={v.key} type="button" className={`btn btn-sm${view === v.key ? ' btn-primary' : ''}`} onClick={() => setView(v.key)}>
             {v.label}
           </button>
         ))}
@@ -180,9 +189,9 @@ export function FormatComparePage() {
         ) : !q.data || q.data.rows.length === 0 ? (
           <EmptyState title={t('formatCompare.empty')} showSyncLink={false} />
         ) : view === 'table' ? (
-          <MatrixTable data={q.data} metric={metric} dimTh={dimTh} fmtLabel={fmtLabel} t={t} />
+          <MatrixTable data={q.data} metric={metric} detail={detail} dimTh={dimTh} fmtLabel={fmtLabel} groupLabel={groupLabel} t={t} />
         ) : view === 'heatmap' ? (
-          <FormatHeatmap data={q.data} groupLabel={groupLabel} fmtLabel={fmtLabel} tokens={tokens} t={t} />
+          <FormatHeatmap data={q.data} detail={detail} groupLabel={groupLabel} fmtLabel={fmtLabel} tokens={tokens} t={t} />
         ) : view === 'scatter' ? (
           <DeviationScatter data={q.data} metric={metric} fmtLabel={fmtLabel} formatColor={formatColor} tokens={tokens} t={t} />
         ) : (
@@ -193,42 +202,62 @@ export function FormatComparePage() {
   )
 }
 
-/** Аддитивный мультивыбор чипами: пустой список = «все». */
+/** Аддитивный мультивыбор чипами: явная подсветка выбранного; пусто = «все». */
 function MultiChips({
   label,
   options,
   selected,
   onChange,
+  accent,
+  allLabel,
 }: {
   label: string
   options: string[]
   selected: string[]
   onChange: (next: string[]) => void
+  accent: string
+  allLabel: string
 }) {
   if (options.length === 0) return null
-  const toggle = (o: string) => {
-    const next = selected.includes(o) ? selected.filter((x) => x !== o) : [...selected, o]
-    onChange(next)
-  }
+  const toggle = (o: string) => onChange(selected.includes(o) ? selected.filter((x) => x !== o) : [...selected, o])
   return (
     <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
       <span className="muted" style={{ fontSize: 13 }}>
         {label}:
       </span>
+      {selected.length === 0 && (
+        <span className="muted" style={{ fontSize: 12, fontStyle: 'italic' }}>
+          {allLabel}
+        </span>
+      )}
       {options.map((o) => {
-        const on = selected.length === 0 || selected.includes(o)
+        const on = selected.includes(o)
         return (
           <button
             key={o}
             type="button"
-            className={`chip${on ? ' chip-on' : ''}`}
             onClick={() => toggle(o)}
-            style={{ fontSize: 12 }}
+            style={{
+              fontSize: 12,
+              padding: '3px 10px',
+              borderRadius: 999,
+              cursor: 'pointer',
+              border: `1px solid ${on ? accent : 'var(--border)'}`,
+              background: on ? accent : 'transparent',
+              color: on ? '#fff' : 'var(--text-muted)',
+              fontWeight: on ? 600 : 400,
+            }}
           >
+            {on ? '✓ ' : ''}
             {o}
           </button>
         )
       })}
+      {selected.length > 0 && (
+        <button type="button" className="btn btn-sm" onClick={() => onChange([])}>
+          {allLabel}
+        </button>
+      )}
     </div>
   )
 }
@@ -265,7 +294,6 @@ function DeviationPicker({
     keys.forEach((k) => (allOn ? next.delete(k) : next.add(k)))
     onChange([...next])
   }
-
   return (
     <div style={{ marginTop: 12 }}>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6 }}>
@@ -302,12 +330,7 @@ function DeviationPicker({
                     {on}/{keys.length}
                   </span>
                 </label>
-                <button
-                  type="button"
-                  className="btn btn-sm"
-                  onClick={() => setOpen(open === g ? null : g)}
-                  aria-expanded={open === g}
-                >
+                <button type="button" className="btn btn-sm" onClick={() => setOpen(open === g ? null : g)} aria-expanded={open === g}>
                   {open === g ? '▾' : '▸'}
                 </button>
               </div>
@@ -329,26 +352,77 @@ function DeviationPicker({
   )
 }
 
-function cellMetric(c: { avg_events_day: number; useful_events_day: number; active_ratio: number } | undefined, metric: Metric): string {
+function metricStr(c: FormatCell | undefined, metric: Metric): string {
   if (!c) return '—'
   if (metric === 'active') return `${Math.round(c.active_ratio * 100)}%`
   const v = metric === 'useful' ? c.useful_events_day : c.avg_events_day
   return fmtNumber(Math.round(v * 10) / 10)
 }
+function metricHead(metric: Metric, t: Translate): string {
+  return metric === 'active' ? t('formatCompare.metricActive') : metric === 'useful' ? t('formatCompare.metricUseful') : t('formatCompare.metricEvents')
+}
 
+/** Таблица: матрица разрез×формат с раскрытием строки в разбивку по отклонениям. */
 function MatrixTable({
   data,
   metric,
+  detail,
   dimTh,
   fmtLabel,
+  groupLabel,
   t,
 }: {
   data: FormatCompareResponse
   metric: Metric
+  detail: Detail
   dimTh: string
   fmtLabel: (f: string) => string
+  groupLabel: (k: string) => string
   t: Translate
 }) {
+  const [open, setOpen] = useState<Set<string>>(new Set())
+  const cols = breakdownCols(data, detail, groupLabel)
+  const toggle = (k: string) => {
+    const next = new Set(open)
+    next.has(k) ? next.delete(k) : next.add(k)
+    setOpen(next)
+  }
+  const span = 1 + data.formats.length * 3
+
+  const breakdown = (cells: Record<string, FormatCell>) => (
+    <td colSpan={span} style={{ background: 'var(--surface-2, rgba(127,127,127,.06))', padding: 8 }}>
+      <div style={{ overflowX: 'auto' }}>
+        <table className="data" style={{ fontSize: 12 }}>
+          <thead>
+            <tr>
+              <th>{t('formatCompare.deviations')}</th>
+              {data.formats.map((f) => (
+                <th key={f} className="num">
+                  {fmtLabel(f)}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {cols.map((col) => (
+              <tr key={col.key}>
+                <td>{col.label}</td>
+                {data.formats.map((f) => {
+                  const v = cellVal(cells[f], col.key, detail, data)
+                  return (
+                    <td key={f} className="num" style={v > 0 ? { color: 'var(--negative)' } : { color: 'var(--text-muted)' }}>
+                      {v > 0 ? v.toFixed(2) : '·'}
+                    </td>
+                  )
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </td>
+  )
+
   return (
     <div className="tablewrap" style={{ overflowX: 'auto' }}>
       <table className="data format-compare">
@@ -363,15 +437,11 @@ function MatrixTable({
           </tr>
           <tr>
             {data.formats.map((f) => [
-              <th key={`${f}-p`} className="num" title={t('formatCompare.people')}>
+              <th key={`${f}-p`} className="num">
                 {t('formatCompare.peopleShort')}
               </th>,
               <th key={`${f}-m`} className="num">
-                {metric === 'active'
-                  ? t('formatCompare.metricActive')
-                  : metric === 'useful'
-                    ? t('formatCompare.metricUseful')
-                    : t('formatCompare.metricEvents')}
+                {metricHead(metric, t)}
               </th>,
               <th key={`${f}-d`} className="num" title={t('formatCompare.devPerPersonFull')}>
                 {t('formatCompare.devPerPerson')}
@@ -381,32 +451,41 @@ function MatrixTable({
         </thead>
         <tbody>
           {data.rows.map((row) => (
-            <tr key={row.key}>
-              <td>{row.key}</td>
-              {data.formats.map((f) => {
-                const c = row.cells[f]
-                const empty = !c || c.people === 0
-                const mut = empty ? { color: 'var(--text-muted)' } : undefined
-                return [
-                  <td key={`${f}-p`} className="num" style={mut}>
-                    {empty ? '—' : c.people}
-                  </td>,
-                  <td key={`${f}-m`} className="num" style={mut}>
-                    {empty ? '—' : cellMetric(c, metric)}
-                  </td>,
-                  <td
-                    key={`${f}-d`}
-                    className="num"
-                    style={empty ? mut : c.dev_per_person > 0 ? { color: 'var(--negative)', fontWeight: 600 } : undefined}
-                  >
-                    {empty ? '—' : c.dev_per_person.toFixed(2)}
-                  </td>,
-                ]
-              })}
-            </tr>
+            <Fragment key={row.key}>
+              <tr style={{ cursor: 'pointer' }} onClick={() => toggle(row.key)}>
+                <td>
+                  <span className="muted" style={{ marginRight: 6 }}>
+                    {open.has(row.key) ? '▾' : '▸'}
+                  </span>
+                  {row.key}
+                </td>
+                {data.formats.map((f) => {
+                  const c = row.cells[f]
+                  const empty = !c || c.people === 0
+                  const mut = empty ? { color: 'var(--text-muted)' } : undefined
+                  return [
+                    <td key={`${f}-p`} className="num" style={mut}>
+                      {empty ? '—' : c.people}
+                    </td>,
+                    <td key={`${f}-m`} className="num" style={mut}>
+                      {empty ? '—' : metricStr(c, metric)}
+                    </td>,
+                    <td key={`${f}-d`} className="num" style={empty ? mut : c.dev_per_person > 0 ? { color: 'var(--negative)', fontWeight: 600 } : undefined}>
+                      {empty ? '—' : c.dev_per_person.toFixed(2)}
+                    </td>,
+                  ]
+                })}
+              </tr>
+              {open.has(row.key) && <tr>{breakdown(row.cells)}</tr>}
+            </Fragment>
           ))}
-          <tr style={{ fontWeight: 600, borderTop: '2px solid var(--border-strong)' }}>
-            <td>{t('formatCompare.total')}</td>
+          <tr style={{ fontWeight: 600, borderTop: '2px solid var(--border-strong)', cursor: 'pointer' }} onClick={() => toggle('__total__')}>
+            <td>
+              <span className="muted" style={{ marginRight: 6 }}>
+                {open.has('__total__') ? '▾' : '▸'}
+              </span>
+              {t('formatCompare.total')}
+            </td>
             {data.formats.map((f) => {
               const c = data.totals[f]
               return [
@@ -414,7 +493,7 @@ function MatrixTable({
                   {c?.people ?? 0}
                 </td>,
                 <td key={`${f}-m`} className="num">
-                  {c && c.people ? cellMetric(c, metric) : '—'}
+                  {c && c.people ? metricStr(c, metric) : '—'}
                 </td>,
                 <td key={`${f}-d`} className="num">
                   {c ? c.dev_per_person.toFixed(2) : '—'}
@@ -422,94 +501,72 @@ function MatrixTable({
               ]
             })}
           </tr>
+          {open.has('__total__') && <tr>{breakdown(data.totals)}</tr>}
         </tbody>
       </table>
     </div>
   )
 }
 
-/** Тепловая карта: строки — форматы, столбцы — группы отклонений, заливка — на человека. */
+/** Тепловая карта: строки — форматы, столбцы — группы или правила. */
 function FormatHeatmap({
   data,
+  detail,
   groupLabel,
   fmtLabel,
   tokens,
   t,
 }: {
   data: FormatCompareResponse
+  detail: Detail
   groupLabel: (k: string) => string
   fmtLabel: (f: string) => string
   tokens: ReturnType<typeof useChartTokens>
   t: Translate
 }) {
-  const groups = data.groups
+  const cols = breakdownCols(data, detail, groupLabel)
   let max = 0
-  for (const f of data.formats) for (const g of groups) max = Math.max(max, data.totals[f]?.dev_by_group?.[g] ?? 0)
+  for (const f of data.formats) for (const col of cols) max = Math.max(max, cellVal(data.totals[f], col.key, detail, data))
   return (
     <div style={{ overflowX: 'auto' }}>
-      <div
-        style={{
-          display: 'grid',
-          gridTemplateColumns: `minmax(90px,auto) repeat(${groups.length}, minmax(90px,1fr))`,
-          gap: 4,
-          minWidth: 480,
-        }}
-      >
+      <div style={{ display: 'grid', gridTemplateColumns: `minmax(90px,auto) repeat(${cols.length}, minmax(84px,1fr))`, gap: 4, minWidth: 420 }}>
         <div />
-        {groups.map((g) => (
-          <div key={g} className="muted" style={{ fontSize: 12, textAlign: 'center', fontWeight: 600 }}>
-            {groupLabel(g)}
+        {cols.map((col) => (
+          <div key={col.key} className="muted" style={{ fontSize: 11, textAlign: 'center', fontWeight: 600, alignSelf: 'end' }}>
+            {col.label}
           </div>
         ))}
         {data.formats.map((f) => (
-          <FmtRow key={f} label={fmtLabel(f)} groups={groups} cell={data.totals[f]} max={max} tokens={tokens} />
+          <Fragment key={f}>
+            <div style={{ fontSize: 13, fontWeight: 600, alignSelf: 'center' }}>{fmtLabel(f)}</div>
+            {cols.map((col) => {
+              const v = cellVal(data.totals[f], col.key, detail, data)
+              const ratio = max > 0 ? v / max : 0
+              return (
+                <div
+                  key={col.key}
+                  title={v.toFixed(2)}
+                  style={{
+                    background: tokens.sequential(ratio),
+                    color: ratio > 0.55 ? '#fff' : 'var(--text)',
+                    borderRadius: 6,
+                    textAlign: 'center',
+                    padding: '10px 4px',
+                    fontVariantNumeric: 'tabular-nums',
+                    fontSize: 13,
+                  }}
+                >
+                  {v > 0 ? v.toFixed(2) : '·'}
+                </div>
+              )
+            })}
+          </Fragment>
         ))}
       </div>
       <p className="muted" style={{ fontSize: 12, marginTop: 8 }}>
         {t('formatCompare.heatmapLegend')}
       </p>
     </div>
-  )
-}
-
-function FmtRow({
-  label,
-  groups,
-  cell,
-  max,
-  tokens,
-}: {
-  label: string
-  groups: string[]
-  cell?: { dev_by_group: Record<string, number> }
-  max: number
-  tokens: ReturnType<typeof useChartTokens>
-}) {
-  return (
-    <>
-      <div style={{ fontSize: 13, fontWeight: 600, alignSelf: 'center' }}>{label}</div>
-      {groups.map((g) => {
-        const v = cell?.dev_by_group?.[g] ?? 0
-        const ratio = max > 0 ? v / max : 0
-        return (
-          <div
-            key={g}
-            title={`${v.toFixed(2)}`}
-            style={{
-              background: tokens.sequential(ratio),
-              color: ratio > 0.55 ? '#fff' : 'var(--text)',
-              borderRadius: 6,
-              textAlign: 'center',
-              padding: '10px 4px',
-              fontVariantNumeric: 'tabular-nums',
-              fontSize: 13,
-            }}
-          >
-            {v > 0 ? v.toFixed(2) : '·'}
-          </div>
-        )
-      })}
-    </>
   )
 }
 
@@ -537,27 +594,11 @@ function DeviationScatter({
       <ResponsiveContainer>
         <ScatterChart margin={{ top: 10, right: 20, bottom: 30, left: 10 }}>
           <CartesianGrid stroke={tokens.grid} />
-          <XAxis
-            type="number"
-            dataKey={xKey}
-            name={xLabel}
-            stroke={tokens.axis}
-            tick={{ fontSize: 12 }}
-            label={{ value: xLabel, position: 'insideBottom', offset: -15, fill: tokens.textMuted, fontSize: 12 }}
-          />
-          <YAxis
-            type="number"
-            dataKey="dev"
-            name={t('formatCompare.devAxis')}
-            stroke={tokens.axis}
-            tick={{ fontSize: 12 }}
-            label={{ value: t('formatCompare.devAxis'), angle: -90, position: 'insideLeft', fill: tokens.textMuted, fontSize: 12 }}
-          />
+          <XAxis type="number" dataKey={xKey} name={xLabel} stroke={tokens.axis} tick={{ fontSize: 12 }} label={{ value: xLabel, position: 'insideBottom', offset: -15, fill: tokens.textMuted, fontSize: 12 }} />
+          <YAxis type="number" dataKey="dev" name={t('formatCompare.devAxis')} stroke={tokens.axis} tick={{ fontSize: 12 }} label={{ value: t('formatCompare.devAxis'), angle: -90, position: 'insideLeft', fill: tokens.textMuted, fontSize: 12 }} />
           <ZAxis range={[60, 60]} />
           <Tooltip
             cursor={{ strokeDasharray: '3 3' }}
-            formatter={(v: number, n: string) => [v, n]}
-            labelFormatter={() => ''}
             content={({ payload }) => {
               const p = payload?.[0]?.payload as FormatScatterPoint | undefined
               if (!p) return null

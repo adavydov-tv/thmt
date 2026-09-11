@@ -305,7 +305,7 @@ export interface FormatCell {
   useful_events_day: number
   active_ratio: number
   dev_per_person: number
-  dev_by_group: Record<string, number>
+  dev_by_rule: Record<string, number>
 }
 export interface FormatScatterPoint {
   name: string
@@ -329,6 +329,7 @@ export interface FormatCompareResponse {
   scatter: FormatScatterPoint[]
   trend: FormatTrend
   groups: string[]
+  rules: string[]
   areas: string[]
   clusters: string[]
   grades: string[]
