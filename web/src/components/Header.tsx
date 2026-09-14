@@ -219,6 +219,7 @@ export function Header({ onShowHelp }: { onShowHelp?: () => void }) {
           { to: '/compare', label: t('nav.comparePeople') },
           { to: '/teams', label: t('nav.compareTeams') },
           { to: '/compare/format', label: t('nav.compareFormat') },
+          { to: '/compare/system', label: t('nav.compareSystem') },
         ],
       },
       {

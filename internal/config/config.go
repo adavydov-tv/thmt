@@ -33,6 +33,7 @@ type Config struct {
 	NetSuite   NetSuiteConfig
 	Claude     ClaudeConfig
 	Overtime   OvertimeConfig
+	PerfReview PerfReviewConfig
 	AI         AIConfig
 	Auth       AuthConfig
 	HRDB       HRDBConfig
@@ -362,6 +363,19 @@ type OvertimeConfig struct {
 	PageSize       int
 }
 
+// PerfReviewConfig — оценки Performance Review и планы PIP/PDP из Jira DC
+// (проект PR): тикеты «Final review» / «Line manager review» с полем «Rate
+// overall impact» и «Personal Development Plan» с полем Type. По умолчанию —
+// тот же инстанс и токен, что у овертаймов (OVERTIME_JIRA_*).
+type PerfReviewConfig struct {
+	Enabled bool
+	BaseURL string
+	Token   string
+	// JQL — базовый запрос тикетов оценок и планов развития.
+	JQL      string
+	PageSize int
+}
+
 // AIConfig — локальный AI-скорер сообщений (docker-контейнер ai-scorer):
 // оценивает содержательность сообщений Slack от 0 до 10.
 type AIConfig struct {
@@ -588,6 +602,14 @@ func Load() (*Config, error) {
 			SecretKey:    env("CLAUDE_S3_SECRET_ACCESS_KEY", ""),
 			SessionToken: env("CLAUDE_S3_SESSION_TOKEN", ""),
 			MaxDays:      envInt("CLAUDE_MAX_DAYS", 120),
+		},
+		PerfReview: PerfReviewConfig{
+			Enabled: envBool("PERF_REVIEW_ENABLED", true),
+			BaseURL: strings.TrimRight(env("PERF_REVIEW_JIRA_URL", env("OVERTIME_JIRA_URL", "https://jira.xtools.tv")), "/"),
+			Token:   env("PERF_REVIEW_JIRA_TOKEN", env("OVERTIME_JIRA_TOKEN", "")),
+			JQL: env("PERF_REVIEW_JQL",
+				`project = PR AND issuetype in ("Final review", "Line manager review", "Functional manager review", "Personal Development Plan")`),
+			PageSize: envInt("PERF_REVIEW_PAGE_SIZE", 100),
 		},
 		Overtime: OvertimeConfig{
 			Enabled: envBool("OVERTIME_ENABLED", true),

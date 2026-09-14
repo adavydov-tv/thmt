@@ -118,8 +118,9 @@ export interface Person {
   /** Команда и направление (Area of Responsibility) из HRDB. */
   team?: string
   area?: string
-  /** Должность из HRDB (напр. «Staff Backend Development»). */
+  /** Должность и грейд из HRDB (напр. «Staff Backend Development», «Senior»). */
   title?: string
+  grade?: string
   /** Дата найма из HRDB: дни до неё не считаются рабочими. */
   hire_date?: string
   created_at?: string
@@ -180,6 +181,80 @@ export interface CompareResponse {
   to: string
   granularity: 'day' | 'week'
   people: PersonMetrics[]
+}
+
+/** Вкладка «По системе»: активность людей в одной системе по месяцам. */
+export interface BySourceBucket {
+  /** YYYY-MM */
+  key: string
+  from: string
+  to: string
+  /** Месяц покрыт периодом не целиком (первый/последний месяц окна). */
+  partial: boolean
+}
+
+export interface BySourceCell {
+  events: number
+  effort: number
+}
+
+/** Оценка Performance Review за цикл (Jira DC, проект PR). */
+export interface ReviewRating {
+  cycle: string
+  /** Код: E (Exceeds), M (Meets), P (Partially meets), D (Does not meet). */
+  grade: 'E' | 'M' | 'P' | 'D'
+  text: string
+  issue_key: string
+  url: string
+  source: string
+}
+
+/** План развития PIP/PDP из проекта PR. */
+export interface ReviewPlan {
+  issue_key: string
+  url: string
+  type: 'PIP' | 'PDP'
+  status: string
+  active: boolean
+  created: string
+}
+
+export interface ReviewCycle {
+  key: string
+  start: string
+}
+
+/** HR-факты человека: стаж, оценки PR по циклам ответа, PIP. */
+export interface HRFacts {
+  tenure_years?: number
+  /** По порядку review_cycles; null — нет оценки за цикл. */
+  reviews?: (ReviewRating | null)[]
+  pip?: ReviewPlan
+}
+
+export interface BySourcePerson {
+  person: Person
+  /** По порядку buckets. */
+  cells: BySourceCell[]
+  total_events: number
+  total_effort: number
+  hr: HRFacts
+}
+
+export interface BySourceResponse {
+  from: string
+  to: string
+  source: string
+  /** Единица «усилия» источника (requests, lines, seconds, мин, писем); пусто — усилия нет. */
+  effort_unit: string
+  buckets: BySourceBucket[]
+  /** Последние циклы оценки Performance Review (для колонки PR). */
+  review_cycles: ReviewCycle[]
+  people: BySourcePerson[]
+}
+
+export interface BySourceQuery extends CompareQuery {
+  source: string
 }
 
 export interface CompareQuery {

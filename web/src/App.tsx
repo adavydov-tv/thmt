@@ -5,6 +5,7 @@ import { Overview } from './pages/Overview'
 import { SourcePage } from './pages/SourcePage'
 import { ComparePage } from './pages/ComparePage'
 import { FormatComparePage } from './pages/FormatComparePage'
+import { SystemComparePage } from './pages/SystemComparePage'
 import { AbusersPage } from './pages/AbusersPage'
 import { AIPage } from './pages/AIPage'
 import { TeamsPage } from './pages/TeamsPage'
@@ -38,6 +39,7 @@ function AppInner() {
           <Route path="/source/:source" element={<SourcePage />} />
           <Route path="/compare" element={<ComparePage />} />
           <Route path="/compare/format" element={<FormatComparePage />} />
+          <Route path="/compare/system" element={<SystemComparePage />} />
           <Route path="/abusers" element={<AbusersPage />} />
           <Route path="/teams" element={<TeamsPage />} />
           <Route path="/violations" element={<ViolationsPage />} />

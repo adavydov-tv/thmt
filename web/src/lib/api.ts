@@ -9,6 +9,8 @@ import type {
   BreakdownDimension,
   CompanyHoliday,
   CompareQuery,
+  BySourceQuery,
+  BySourceResponse,
   CompareResponse,
   CountItem,
   DaysResponse,
@@ -215,6 +217,7 @@ export const api = {
   cancelSync: (id: string) =>
     request<SyncRun>(`/sync/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
   compare: (q: CompareQuery) => request<CompareResponse>(`/stats/compare${buildQuery({ ...q })}`),
+  bySource: (q: BySourceQuery) => request<BySourceResponse>(`/stats/by-source${buildQuery({ ...q })}`),
   compareTeams: (q: TeamsCompareQuery) =>
     request<TeamsCompareResponse>(`/stats/teams${buildQuery({ ...q })}`),
   formatCompare: (q: {

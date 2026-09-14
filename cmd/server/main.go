@@ -25,6 +25,7 @@ import (
 	"github.com/adavydov/user-activity-dashboard/internal/hrdb"
 	"github.com/adavydov/user-activity-dashboard/internal/models"
 	"github.com/adavydov/user-activity-dashboard/internal/overtime"
+	"github.com/adavydov/user-activity-dashboard/internal/perfreview"
 	"github.com/adavydov/user-activity-dashboard/internal/storage"
 	syncsvc "github.com/adavydov/user-activity-dashboard/internal/sync"
 )
@@ -259,9 +260,21 @@ func main() {
 		}
 	}
 
+	// Оценки Performance Review и PIP из Jira DC (проект PR) — HR-колонки
+	// вкладки «По системе». Прогрев фоном: Jira DC за прокси отвечает секундами.
+	var perfClient *perfreview.Client
+	if cfg.PerfReview.Enabled {
+		if perfClient, err = perfreview.New(cfg.PerfReview, cfg.Sync.HTTPTimeout, cfg.Sync.MaxRetries, log); err != nil {
+			log.Warn("performance review недоступен", "err", err)
+			perfClient = nil
+		} else {
+			go perfClient.WarmUp(ctx, log)
+		}
+	}
+
 	srv := &http.Server{
 		Addr:              cfg.Server.Addr,
-		Handler:           api.NewServer(cfg, store, orch, hrdbClient, disc, aiClient, overtimeClient, authService, log).Router(),
+		Handler:           api.NewServer(cfg, store, orch, hrdbClient, disc, aiClient, overtimeClient, perfClient, authService, log).Router(),
 		ReadHeaderTimeout: 15 * time.Second,
 		WriteTimeout:      120 * time.Second,
 		IdleTimeout:       120 * time.Second,

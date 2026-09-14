@@ -1666,3 +1666,69 @@ GROUP BY project ORDER BY count(*) DESC LIMIT 200`
 	}
 	return out, rows.Err()
 }
+
+// SourceMonthCell — активность человека в одной системе за один месяц.
+type SourceMonthCell struct {
+	Events int
+	Effort float64
+}
+
+// SourceMonthly агрегирует события одной системы по людям и календарным
+// месяцам (границы месяцев — в loc). Возвращает ячейки по ключу человека и
+// месяца «YYYY-MM» и единицу «усилия» источника: самая частая непустая
+// effort_unit в выборке (у Claude — requests, у GitLab — lines, у Jira —
+// seconds ворклогов). Effort суммируется только по строкам с этой единицей,
+// чтобы не складывать минуты с письмами у смешанных источников (gwork).
+func (s *Store) SourceMonthly(ctx context.Context, people []models.Person, source string, from, to time.Time, loc *time.Location) (map[string]map[string]SourceMonthCell, string, error) {
+	out := make(map[string]map[string]SourceMonthCell, len(people))
+	if len(people) == 0 {
+		return out, "", nil
+	}
+	keys := make([]string, 0, len(people))
+	for _, p := range people {
+		keys = append(keys, p.Key)
+	}
+
+	var unit string
+	const unitQ = `
+SELECT effort_unit
+FROM events
+WHERE source = $1 AND person_key = ANY($2) AND occurred_at >= $3 AND occurred_at < $4 AND effort_unit <> ''
+GROUP BY 1
+ORDER BY count(*) DESC
+LIMIT 1`
+	if err := s.pool.QueryRow(ctx, unitQ, source, keys, from, to).Scan(&unit); err != nil && err != pgx.ErrNoRows {
+		return nil, "", fmt.Errorf("source monthly: единица усилия: %w", err)
+	}
+
+	const q = `
+SELECT person_key,
+       to_char(date_trunc('month', occurred_at AT TIME ZONE $5), 'YYYY-MM') AS month,
+       count(*),
+       COALESCE(sum(effort) FILTER (WHERE effort_unit = $6), 0)
+FROM events
+WHERE source = $1 AND person_key = ANY($2) AND occurred_at >= $3 AND occurred_at < $4
+GROUP BY 1, 2`
+	rows, err := s.pool.Query(ctx, q, source, keys, from, to, loc.String(), unit)
+	if err != nil {
+		return nil, "", fmt.Errorf("source monthly: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var key, month string
+		var cell SourceMonthCell
+		if err := rows.Scan(&key, &month, &cell.Events, &cell.Effort); err != nil {
+			return nil, "", err
+		}
+		m := out[key]
+		if m == nil {
+			m = map[string]SourceMonthCell{}
+			out[key] = m
+		}
+		m[month] = cell
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+	return out, unit, nil
+}

@@ -28,6 +28,7 @@ import (
 	"github.com/adavydov/user-activity-dashboard/internal/hrdb"
 	"github.com/adavydov/user-activity-dashboard/internal/models"
 	"github.com/adavydov/user-activity-dashboard/internal/overtime"
+	"github.com/adavydov/user-activity-dashboard/internal/perfreview"
 	"github.com/adavydov/user-activity-dashboard/internal/storage"
 	syncsvc "github.com/adavydov/user-activity-dashboard/internal/sync"
 )
@@ -45,6 +46,8 @@ type Server struct {
 	ai *ai.Client
 	// overtime может быть nil — Jira с заявками на овертаймы не настроена.
 	overtime *overtime.Client
+	// perf может быть nil — Jira DC с оценками Performance Review не настроена.
+	perf *perfreview.Client
 
 	// devCache — кэш рассчитанных отклонений (см. violations.go).
 	devMu    sync.Mutex
@@ -60,12 +63,12 @@ type Server struct {
 // overtimeClient могут быть nil.
 func NewServer(cfg *config.Config, store *storage.Store, orch *syncsvc.Orchestrator,
 	hrdbClient *hrdb.Switcher, disc *discovery.Service, aiClient *ai.Client,
-	overtimeClient *overtime.Client, authSvc *auth.Service, log *slog.Logger) *Server {
+	overtimeClient *overtime.Client, perfClient *perfreview.Client, authSvc *auth.Service, log *slog.Logger) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
 	s := &Server{cfg: cfg, store: store, orch: orch, hrdb: hrdbClient,
-		discover: disc, ai: aiClient, overtime: overtimeClient, log: log,
+		discover: disc, ai: aiClient, overtime: overtimeClient, perf: perfClient, log: log,
 		devCache: map[string]devCacheEntry{}, auth: authSvc,
 		leadScopes: map[string]*leadScopeData{}}
 	// Завершение любого сбора делает кэш отклонений неактуальным.
@@ -131,6 +134,7 @@ func (s *Server) Router() http.Handler {
 		r.Get("/stats/heatmap", s.handleHeatmap)
 		r.Get("/stats/days", s.handleDays)
 		r.Get("/stats/compare", s.handleCompare)
+		r.Get("/stats/by-source", s.handleCompareBySource)
 		r.Get("/stats/teams", s.handleCompareTeams)
 		r.Get("/stats/format-compare", s.handleFormatCompare)
 		r.Get("/stats/abusers", s.handleAbusers)
@@ -326,22 +330,7 @@ func (s *Server) handleListPeople(w http.ResponseWriter, r *http.Request) {
 		people = kept
 	}
 	// Обогащаем должностью и грейдом из HRDB-кэша по e-mail (в БД не хранятся).
-	if hc := s.hrdb.Current(); hc != nil {
-		if emps, err := hc.ListEmployees(r.Context()); err == nil {
-			type hr struct{ title, grade string }
-			byEmail := make(map[string]hr, len(emps))
-			for _, e := range emps {
-				if e.Email != "" {
-					byEmail[strings.ToLower(strings.TrimSpace(e.Email))] = hr{e.Title, e.Grade}
-				}
-			}
-			for i := range people {
-				if h, ok := byEmail[strings.ToLower(strings.TrimSpace(people[i].Email))]; ok {
-					people[i].Title, people[i].Grade = h.title, h.grade
-				}
-			}
-		}
-	}
+	s.enrichTitles(r, people)
 	if people == nil {
 		people = []models.Person{}
 	}
@@ -1253,42 +1242,10 @@ func (s *Server) handleCompare(w http.ResponseWriter, r *http.Request) {
 	for _, t := range multi(q["team"]) {
 		wantTeams[strings.ToLower(t)] = true
 	}
-	area := strings.TrimSpace(q.Get("area"))
-
-	people, err := s.store.ListPeople(r.Context())
+	filtered, err := s.comparePeople(r, wantTeams, strings.TrimSpace(q.Get("area")))
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
-	}
-
-	// Бывшие сотрудники (object type Ex-employee в HRDB) в сравнении не
-	// участвуют: их данные остаются в базе, но карточки скрываются.
-	// Недоступность HRDB не ломает страницу — просто без этого фильтра.
-	exEmails := map[string]bool{}
-	if s.hrdb != nil {
-		if ex, err := s.hrdb.Current().ExEmployeeEmails(r.Context()); err != nil {
-			s.log.Warn("не удалось получить список бывших сотрудников", "err", err)
-		} else {
-			exEmails = ex
-		}
-	}
-
-	scope := s.requestScope(r)
-	filtered := make([]models.Person, 0, len(people))
-	for _, p := range people {
-		if scope != nil && !scope.persons[p.Key] {
-			continue
-		}
-		if len(wantTeams) > 0 && !wantTeams[strings.ToLower(p.Team)] {
-			continue
-		}
-		if area != "" && !strings.EqualFold(p.Area, area) {
-			continue
-		}
-		if exEmails[strings.ToLower(strings.TrimSpace(p.Email))] {
-			continue
-		}
-		filtered = append(filtered, p)
 	}
 
 	metrics, granularity, err := s.store.ComparePeople(r.Context(), filtered, from, to, loc)

@@ -13,6 +13,8 @@ import type {
   BreakdownDimension,
   CompareQuery,
   CompareResponse,
+  BySourceQuery,
+  BySourceResponse,
   CountItem,
   DaysResponse,
   DiscoverRequest,
@@ -121,6 +123,15 @@ export function useCompare(q: CompareQuery, options?: Opt<CompareResponse>) {
   return useQuery<CompareResponse>({
     queryKey: ['stats', 'compare', q] as const,
     queryFn: () => api.compare(q),
+    ...options,
+  })
+}
+
+/** Активность людей в одной системе по месяцам — вкладка «По системе». */
+export function useBySource(q: BySourceQuery, options?: Opt<BySourceResponse>) {
+  return useQuery<BySourceResponse>({
+    queryKey: ['stats', 'by-source', q] as const,
+    queryFn: () => api.bySource(q),
     ...options,
   })
 }
