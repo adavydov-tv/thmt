@@ -25,6 +25,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/adavydov/user-activity-dashboard/internal/collectors"
@@ -62,7 +63,16 @@ type Collector struct {
 	// Флаг «липкий» на время одного Collect, чтобы не долбиться в 404 на каждой
 	// странице пагинации.
 	legacySearch bool
+
+	// authMu/authOKAt — кэш успешной проверки авторизации (ensureAuthenticated).
+	// Коллектор один на все параллельные Collect, поэтому /myself дёргается не
+	// чаще authRecheck, а не на каждого человека.
+	authMu   sync.Mutex
+	authOKAt time.Time
 }
+
+// authRecheck — как долго доверять последней успешной проверке /myself.
+const authRecheck = 10 * time.Minute
 
 // Проверки контракта на этапе компиляции.
 var (
@@ -201,6 +211,10 @@ func (c *Collector) Collect(ctx context.Context, req collectors.Request) (collec
 		return res, fmt.Errorf("jira: пустой период %s..%s", from, to)
 	}
 
+	if err := c.ensureAuthenticated(ctx); err != nil {
+		return res, err
+	}
+
 	jql := c.buildJQL(act, from, to)
 	c.log.Debug("jira jql", "person", req.Person.Key, "jql", jql)
 
@@ -305,6 +319,45 @@ func (c *Collector) buildJQL(a actor, from, to time.Time) string {
 func jqlQuote(s string) string {
 	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`)
 	return `"` + r.Replace(s) + `"`
+}
+
+// ensureAuthenticated проверяет, что Jira принимает наши учётные данные.
+//
+// Зачем: Jira Cloud при невалидном Basic auth не отвечает 401 на /search, а
+// молча считает запрос анонимным и отдаёт 200 с пустым списком — сбор при этом
+// выглядит как «done, 0 событий», и протухший токен не замечают днями. Поэтому
+// перед поиском один раз (с кэшем на authRecheck) дёргаем /rest/api/3/myself:
+// 401/403 превращаем в явную ошибку рана. Прочие сбои (сеть, 5xx) не блокируют
+// сбор — поиск сам упадёт с понятной ошибкой, если проблема настоящая.
+func (c *Collector) ensureAuthenticated(ctx context.Context) error {
+	c.authMu.Lock()
+	defer c.authMu.Unlock()
+	if !c.authOKAt.IsZero() && time.Since(c.authOKAt) < authRecheck {
+		return nil
+	}
+
+	var me struct {
+		AccountID string `json:"accountId"`
+		Email     string `json:"emailAddress"`
+		Active    *bool  `json:"active"`
+	}
+	_, err := c.cl.GetJSON(ctx, "/rest/api/3/myself", nil, &me)
+	switch {
+	case err == nil:
+		if me.Active != nil && !*me.Active {
+			return fmt.Errorf("jira: учётная запись %q деактивирована — сбор невозможен", c.cfg.Email)
+		}
+		c.authOKAt = time.Now()
+		return nil
+	case isStatus(err, http.StatusUnauthorized, http.StatusForbidden):
+		var ae *httpx.APIError
+		errors.As(err, &ae)
+		return fmt.Errorf("jira: авторизация отклонена (HTTP %d) для %s — проверьте JIRA_EMAIL/JIRA_API_TOKEN, токен мог истечь или быть отозван",
+			ae.Status, c.cfg.Email)
+	default:
+		c.log.Warn("jira: не удалось проверить авторизацию, продолжаю сбор", "err", err)
+		return nil
+	}
 }
 
 // ---------------------------------------------------------------------------
