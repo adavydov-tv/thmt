@@ -242,8 +242,11 @@ func (o *one) collectGroup(ctx context.Context, people []models.Person, from, to
 			PersonKey: pk, Source: models.SourceZabbix, Type: models.TypeZabbixChange,
 			ExternalID: "zbx-audit:" + o.inst.Env + ":" + a.AuditID,
 			OccurredAt: at,
-			Title:      fmt.Sprintf("%s: %s %s (%s)", act, a.ResourceType, a.ResourceName, o.inst.Env),
-			Meta:       map[string]any{"env": o.inst.Env, "action": a.Action, "resource_type": a.ResourceType, "resource": a.ResourceName},
+			Title:      fmt.Sprintf("%s: %s %s (%s)", act, resourceTypeLabel(a.ResourceType), a.ResourceName, o.inst.Env),
+			Meta: map[string]any{
+				"env": o.inst.Env, "action": a.Action, "resource": a.ResourceName,
+				"resource_type": a.ResourceType, "resource_type_name": resourceTypeLabel(a.ResourceType),
+			},
 		}
 		ev.Normalize()
 		out[pk] = append(out[pk], ev)
@@ -279,4 +282,65 @@ func (c *Collector) Collect(ctx context.Context, req collectors.Request) (collec
 	res.Events = byPerson[req.Person.Key]
 	res.Note = note
 	return res, nil
+}
+
+// resourceTypeLabels — коды resourcetype из auditlog.get (Zabbix 7.x).
+// Справочник: https://www.zabbix.com/documentation/7.0/en/manual/api/reference/auditlog/object
+var resourceTypeLabels = map[string]string{
+	"0":  "пользователь",
+	"2":  "конфигурация Zabbix",
+	"3":  "способ оповещения",
+	"4":  "узел сети",
+	"5":  "действие",
+	"6":  "график",
+	"11": "группа пользователей",
+	"13": "триггер",
+	"14": "группа узлов сети",
+	"15": "элемент данных",
+	"16": "изображение",
+	"17": "карта значений",
+	"18": "услуга",
+	"19": "карта сети",
+	"22": "веб-сценарий",
+	"23": "правило обнаружения",
+	"25": "скрипт",
+	"26": "прокси",
+	"27": "обслуживание",
+	"28": "регулярное выражение",
+	"29": "макрос",
+	"30": "шаблон",
+	"31": "прототип триггера",
+	"32": "сопоставление иконок",
+	"33": "панель",
+	"34": "корреляция событий",
+	"35": "прототип графика",
+	"36": "прототип элемента данных",
+	"37": "прототип узла сети",
+	"38": "авторегистрация",
+	"39": "модуль",
+	"40": "настройки",
+	"41": "очистка истории",
+	"42": "аутентификация",
+	"43": "панель шаблона",
+	"44": "роль пользователя",
+	"45": "API-токен",
+	"46": "отчёт по расписанию",
+	"47": "узел высокой доступности",
+	"48": "SLA",
+	"49": "каталог пользователей",
+	"50": "группа шаблонов",
+	"51": "коннектор",
+	"52": "прототип правила обнаружения",
+	"53": "история",
+	"54": "метод MFA",
+	"55": "группа прокси",
+}
+
+// resourceTypeLabel возвращает человекочитаемое название типа ресурса аудита;
+// для неизвестного кода — «ресурс #N», чтобы код не терялся.
+func resourceTypeLabel(code string) string {
+	if l, ok := resourceTypeLabels[code]; ok {
+		return l
+	}
+	return "ресурс #" + code
 }
